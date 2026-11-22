@@ -1,4 +1,4 @@
-import { COORDINATE_LIMIT, id } from './model.ts'
+import { COORDINATE_LIMIT, copyStroke } from './model.ts'
 import type { Point, Stroke } from './model.ts'
 
 export type SelectionMode = 'rectangle' | 'lasso'
@@ -39,7 +39,7 @@ export function insideBounds(box: Bounds, p: Point, padding = 0) {
     && p.y >= box.top - padding && p.y <= box.bottom + padding
 }
 
-function distanceSquared(p: Point, a: Point, b: Point) {
+export function distanceSquared(p: Point, a: Point, b: Point) {
   const dx = b.x - a.x, dy = b.y - a.y
   const length = dx * dx + dy * dy
   const t = length ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length)) : 0
@@ -52,7 +52,7 @@ function crosses(a: Point, b: Point, c: Point, d: Point) {
   return side(a, b, c) * side(a, b, d) < 0 && side(c, d, a) * side(c, d, b) < 0
 }
 
-function contains(p: Point, polygon: readonly Point[]) {
+export function contains(p: Point, polygon: readonly Point[]) {
   let inside = false
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
     const a = polygon[i], b = polygon[j]
@@ -120,21 +120,21 @@ export function transformLines(strokes: Stroke[], ids: ReadonlySet<string>, { dx
   if (!box) return strokes
   const centerX = (box.left + box.right) / 2, centerY = (box.top + box.bottom) / 2
   const angle = degrees * Math.PI / 180, cosine = Math.cos(angle), sine = Math.sin(angle)
+  function transformPoint(point: Point): Point {
+    const x = (point.x - centerX) * scale, y = (point.y - centerY) * scale
+    return { ...point, x: centerX + dx + x * cosine - y * sine, y: centerY + dy + x * sine + y * cosine }
+  }
   const result = editSelected(strokes, ids, stroke => ({
-    ...stroke, points: stroke.points.map(point => {
-      const x = (point.x - centerX) * scale, y = (point.y - centerY) * scale
-      return { ...point, x: centerX + dx + x * cosine - y * sine, y: centerY + dy + x * sine + y * cosine }
-    }),
+    ...stroke, points: stroke.points.map(transformPoint),
+    ...(stroke.clips && { clips: stroke.clips.map(clip => ({ ...clip, polygon: clip.polygon.map(transformPoint) })) }),
   }))
   // Keep off-canvas coordinates without clipping the stroke or exceeding the file format limits.
-  return result.some((stroke, i) => stroke !== strokes[i] && stroke.points.some(p =>
+  return result.some((stroke, i) => stroke !== strokes[i] && [...stroke.points, ...(stroke.clips?.flatMap(clip => clip.polygon) ?? [])].some(p =>
     Math.abs(p.x) > COORDINATE_LIMIT || Math.abs(p.y) > COORDINATE_LIMIT)) ? strokes : result
 }
 
 export function duplicateLines(strokes: Stroke[], ids: ReadonlySet<string>) {
-  const copies = strokes.filter(stroke => ids.has(stroke.id) && editableLine(stroke)).map(stroke => ({
-    ...stroke, id: id(), points: stroke.points.map(point => ({ ...point })),
-  }))
+  const copies = strokes.filter(stroke => ids.has(stroke.id) && editableLine(stroke)).map(copyStroke)
   const copyIds = new Set(copies.map(stroke => stroke.id))
   return { strokes: copies.length ? [...strokes, ...transformLines(copies, copyIds, { dx: 24, dy: 24 })] : strokes, ids: copyIds }
 }

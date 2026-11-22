@@ -8,9 +8,12 @@ import type { Onion, Tool } from './Stage'
 import { Inspector, swatches } from './Inspector'
 import { Timeline } from './Timeline'
 import { initialProject, makeHistory, MAX_IMPORT_BYTES, parseProject, reduce } from './model'
-import type { Stroke } from './model'
+import type { Frame, Stroke } from './model'
+import type { CleanupResult } from './CleanupPanel'
+import type { CleanupInput, CleanupMode } from './cleanup'
+import { archiveRoughs, stageCleanup } from './cleanupScope'
 import { deleteLines, duplicateLines, editSelected, smoothLines, transformLines } from './selection'
-import type { SelectionMode, Smoothing, Transform } from './selection'
+import type { Region, SelectionMode, Smoothing, Transform } from './selection'
 import { usePlayback } from './playback'
 import { download, exportPng, fileBase } from './files'
 
@@ -28,7 +31,11 @@ export function App() {
   const { project, index } = history.present
   const [tool, setTool] = useState<Tool>('pen')
   const [mode, setMode] = useState<SelectionMode>('rectangle')
-  const [selection, setSelection] = useState<{ frameId: string; ids: ReadonlySet<string> } | null>(null)
+  const [selection, setSelection] = useState<{ frameId: string; ids: ReadonlySet<string>; region: Region | null } | null>(null)
+  const [cleanupBusy, setCleanupBusy] = useState(false)
+  const [cleanupError, setCleanupError] = useState('')
+  const [cleanup, setCleanup] = useState<(CleanupResult & { frame: Frame; input: CleanupInput }) | null>(null)
+  const cleanupRequest = useRef<AbortController | null>(null)
   const [candidate, setCandidate] = useState<Smoothing | null>(null)
   const [sizes, setSizes] = useState({ pen: 8, eraser: 36 })
   const [color, setColor] = useState(swatches[0])
@@ -50,10 +57,25 @@ export function App() {
   const selectedStrokes = useMemo(() => frame.strokes.filter(stroke => selected.has(stroke.id)), [frame, selected])
   const preview = useMemo(() => candidate === null || playing || !selected.size ? null
     : smoothLines(frame.strokes, selected, candidate), [frame, selected, candidate, playing])
+  const aiPreview = useMemo(() => {
+    if (!cleanup || cleanup.frame !== frame || playing) return null
+    return stageCleanup(frame, cleanup.input.targets, cleanup.input.polygon, cleanup.candidates[cleanup.active].strokes)
+  }, [cleanup, frame, playing])
   const brush = tool === 'eraser' ? 'eraser' : 'pen'
   const onStroke = useCallback((frameId: string, stroke: Stroke) => dispatch({ type: 'stroke', frameId, stroke }), [])
 
+  const resetCleanup = useCallback(() => {
+    cleanupRequest.current?.abort()
+    cleanupRequest.current = null
+    setCleanupBusy(false)
+    setCleanup(null)
+    setCleanupError('')
+  }, [])
+
+  useEffect(() => () => cleanupRequest.current?.abort(), [])
+
   function clearSelection() {
+    resetCleanup()
     setSelection(null)
     setCandidate(null)
   }
@@ -63,10 +85,43 @@ export function App() {
     setTool(next)
   }
 
-  function selectLines(ids: Iterable<string>) {
+  function selectLines(ids: Iterable<string>, region?: Region) {
     if (playing || candidate !== null) return
+    resetCleanup()
     const next = new Set(ids)
-    setSelection(next.size ? { frameId: frame.id, ids: next } : null)
+    setSelection(next.size ? { frameId: frame.id, ids: next, region: region ?? null } : null)
+  }
+
+  async function runCleanup(mode: CleanupMode, strength: number, token: string) {
+    if (playing || cleanupRequest.current || !selection || !selectedStrokes.some(stroke => !stroke.locked)) return
+    setCleanup(null)
+    setCleanupError('')
+    setCleanupBusy(true)
+    const request = new AbortController()
+    cleanupRequest.current = request
+    try {
+      const { prepareCleanup, generateCleanup } = await import('./cleanup')
+      request.signal.throwIfAborted()
+      const input = prepareCleanup(frame, project.canvas, selected, selection.region)
+      const candidates = await generateCleanup(input, mode, strength, token, request.signal)
+      if (cleanupRequest.current === request) setCleanup({ frame, input, mode, candidates, active: 0 })
+    } catch (error) {
+      if (cleanupRequest.current === request) {
+        setCleanupError(error instanceof Error ? error.message : '清書候補を取得できませんでした。')
+        request.abort()
+      }
+    } finally {
+      if (cleanupRequest.current === request) {
+        cleanupRequest.current = null
+        setCleanupBusy(false)
+      }
+    }
+  }
+
+  function applyCleanup() {
+    if (playing || cleanup?.frame !== frame || !aiPreview?.originals.length) return
+    dispatch({ type: 'edit-lines', source: frame, strokes: aiPreview.strokes, archive: archiveRoughs(aiPreview.originals) })
+    selectLines(cleanup.candidates[cleanup.active].strokes.map(stroke => stroke.id))
   }
 
   function commitLines(strokes: Stroke[]) {
@@ -76,11 +131,14 @@ export function App() {
   }
 
   function transform(value: Transform) {
-    if (candidate === null) commitLines(transformLines(frame.strokes, selected, value))
+    if (candidate !== null || cleanupBusy || cleanup) return
+    const next = transformLines(frame.strokes, selected, value)
+    if (next !== frame.strokes) setSelection(current => current && { ...current, region: null })
+    commitLines(next)
   }
 
   function removeLines() {
-    if (candidate !== null || playing) return
+    if (candidate !== null || playing || cleanupBusy || cleanup) return
     commitLines(deleteLines(frame.strokes, selected))
     selectLines(selectedStrokes.filter(stroke => stroke.locked).map(stroke => stroke.id))
   }
@@ -179,9 +237,10 @@ export function App() {
       if (key === 'e') changeTool('eraser')
       if (key === 'h') changeTool('hand')
       if (key === 'v' && !playing) changeTool('select')
-      if (key === 'escape' && candidate !== null) setCandidate(null)
+      if (key === 'escape' && (cleanupBusy || cleanup || cleanupError)) resetCleanup()
+      else if (key === 'escape' && candidate !== null) setCandidate(null)
       else if (key === 'escape') clearSelection()
-      if ((key === 'delete' || key === 'backspace') && selected.size && candidate === null) {
+      if ((key === 'delete' || key === 'backspace') && selected.size && candidate === null && !cleanupBusy && !cleanup) {
         event.preventDefault()
         removeLines()
       }
@@ -254,12 +313,19 @@ export function App() {
         <Stage key={boardKey} board={project.canvas} frame={frame} previous={project.frames[shown - 1]}
           next={project.frames[shown + 1]} onion={onion} tool={tool} size={sizes[brush]} color={color}
           playing={playing} space={space} onStroke={onStroke} mode={mode} selected={selected}
-          preview={preview} onSelect={selectLines} onMove={(dx, dy) => transform({ dx, dy })} />
+          preview={aiPreview?.strokes ?? (cleanupBusy ? frame.strokes : preview)} onSelect={selectLines} onMove={(dx, dy) => transform({ dx, dy })} />
         <Inspector tool={tool} size={sizes[brush]} setSize={size => setSizes({ ...sizes, [brush]: size })}
           color={color} setColor={setColor} onion={onion} setOnion={setOnion}
           lines={{
             mode, setMode, playing, strokes: selectedStrokes, candidate, choose: setCandidate,
             clear: clearSelection, transform, remove: removeLines,
+            cleanup: {
+              busy: cleanupBusy, result: cleanup, error: cleanupError,
+              canStart: !playing && selectedStrokes.some(stroke => !stroke.locked),
+              generate: (mode, strength, token) => void runCleanup(mode, strength, token),
+              choose: active => setCleanup(current => current && { ...current, active }),
+              apply: applyCleanup, cancel: resetCleanup,
+            },
             apply: () => {
               if (preview) commitLines(preview)
               setCandidate(null)

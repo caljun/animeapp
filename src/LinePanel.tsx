@@ -1,17 +1,21 @@
 import { Copy, LockKeyhole, LockKeyholeOpen, RotateCw, Scan, Trash2, WandSparkles } from 'lucide-react'
 import type { SelectionMode, Smoothing, Transform } from './selection'
 import type { Stroke } from './model'
+import { CleanupPanel } from './CleanupPanel'
+import type { CleanupPanelProps } from './CleanupPanel'
 
 export type LinePanelProps = {
   mode: SelectionMode; setMode: (mode: SelectionMode) => void; playing: boolean
   strokes: Stroke[]; candidate: Smoothing | null
   choose: (candidate: Smoothing | null) => void; apply: () => void; clear: () => void
   transform: (value: Transform) => void; duplicate: () => void; remove: () => void
+  cleanup: CleanupPanelProps
   style: (value: { color?: string; size?: number }) => void; lock: (locked: boolean) => void
 }
 
 export function LinePanel({ mode, setMode, playing, strokes, candidate, choose, apply, clear, transform,
-  duplicate, remove, style, lock }: LinePanelProps) {
+  duplicate, remove, style, lock, cleanup }: LinePanelProps) {
+  const cleanupInProgress = cleanup.busy || cleanup.result !== null
   const locked = strokes.filter(stroke => stroke.locked).length
   const free = strokes.length - locked
   const first = strokes.find(stroke => !stroke.locked)
@@ -19,13 +23,14 @@ export function LinePanel({ mode, setMode, playing, strokes, candidate, choose, 
     <section className="panel-section line-panel" aria-label="選択した線の編集">
       <div className="selection-heading"><Scan /><h2>範囲選択</h2></div>
       <div className="selection-modes" role="group" aria-label="選択方法">
-        <button disabled={playing || candidate !== null} aria-pressed={mode === 'rectangle'} onClick={() => setMode('rectangle')}>矩形</button>
-        <button disabled={playing || candidate !== null} aria-pressed={mode === 'lasso'} onClick={() => setMode('lasso')}>投げ縄</button>
+        <button disabled={playing || candidate !== null || cleanupInProgress} aria-pressed={mode === 'rectangle'} onClick={() => setMode('rectangle')}>矩形</button>
+        <button disabled={playing || candidate !== null || cleanupInProgress} aria-pressed={mode === 'lasso'} onClick={() => setMode('lasso')}>投げ縄</button>
       </div>
       <div className="selection-info">
         <span aria-live="polite">{strokes.length} 本を選択{locked > 0 && <small><LockKeyhole /> {locked} 本固定</small>}</span>
         <button onClick={clear} disabled={!strokes.length || playing}>選択解除</button>
       </div>
+      {candidate === null && (free > 0 || cleanupInProgress) && <CleanupPanel {...cleanup} />}
       {candidate !== null ? (
         <div className="smoothing-panel">
           <h3>線の補正候補</h3>
@@ -39,7 +44,7 @@ export function LinePanel({ mode, setMode, playing, strokes, candidate, choose, 
             <button className="line-primary" disabled={playing} onClick={apply}>適用</button>
           </div>
         </div>
-      ) : strokes.length > 0 ? (
+      ) : cleanupInProgress ? null : strokes.length > 0 ? (
         <>
           <p className="panel-note selection-tip">{free ? '選択枠の内側をドラッグして移動できます。' : '線を編集するには固定を解除します。'}</p>
           {first && <fieldset className="line-controls" disabled={playing}>

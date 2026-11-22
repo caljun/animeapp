@@ -1,7 +1,8 @@
 export type Point = { x: number; y: number; pressure?: number }
+export type Clip = { mode: 'inside' | 'outside'; polygon: Point[] }
 export type StrokeTool = 'pen' | 'eraser'
-export type Stroke = { id: string; points: Point[]; color: string; size: number; tool: StrokeTool; locked?: boolean }
-export type Frame = { id: string; strokes: Stroke[] }
+export type Stroke = { id: string; points: Point[]; color: string; size: number; tool: StrokeTool; locked?: boolean; clips?: Clip[] }
+export type Frame = { id: string; strokes: Stroke[]; roughs?: Stroke[] }
 export type Artboard = { width: number; height: number; background: string }
 export type Project = { version: 1; name: string; canvas: Artboard; fps: number; frames: Frame[] }
 export type Editor = { project: Project; index: number }
@@ -10,7 +11,7 @@ export type Action =
   | { type: 'load'; project: Project }
   | { type: 'select'; index: number }
   | { type: 'stroke'; frameId: string; stroke: Stroke }
-  | { type: 'edit-lines'; source: Frame; strokes: Stroke[] }
+  | { type: 'edit-lines'; source: Frame; strokes: Stroke[]; archive?: Stroke[] }
   | { type: 'add' | 'duplicate' | 'delete' | 'undo' | 'redo' }
   | { type: 'fps'; value: number }
   | { type: 'rename'; value: string }
@@ -20,6 +21,13 @@ export const MAX_FRAMES = 1000
 export const MAX_IMPORT_BYTES = 64 * 1024 * 1024
 export const id = () => crypto.randomUUID()
 const blank = (): Frame => ({ id: id(), strokes: [] })
+
+export function copyStroke(stroke: Stroke): Stroke {
+  return {
+    ...stroke, id: id(), points: stroke.points.map(point => ({ ...point })),
+    ...(stroke.clips && { clips: stroke.clips.map(clip => ({ ...clip, polygon: clip.polygon.map(p => ({ ...p })) })) }),
+  }
+}
 
 export const initialProject = (): Project => ({
   version: 1, name: '無題のアニメーション', canvas: { width: 1920, height: 1080, background: '#ffffff' },
@@ -57,15 +65,15 @@ export function reduce(state: History, action: Action): History {
     }
     case 'edit-lines':
       return frames[index] !== action.source || action.strokes === action.source.strokes ? state
-        : setFrames(frames.map((frame, position) => position === index ? { ...frame, strokes: action.strokes } : frame))
+        : setFrames(frames.map((frame, position) => position === index ? { ...frame, strokes: action.strokes, ...(action.archive?.length
+          ? { roughs: [...(frame.roughs ?? []), ...action.archive] } : {}) } : frame))
     case 'add':
     case 'duplicate': {
       if (frames.length >= MAX_FRAMES) return state
       const next = blank()
       if (action.type === 'duplicate') {
-        next.strokes = frames[index].strokes.map(stroke => ({
-          ...stroke, id: id(), points: stroke.points.map(point => ({ ...point })),
-        }))
+        next.strokes = frames[index].strokes.map(copyStroke)
+        if (frames[index].roughs) next.roughs = frames[index].roughs.map(copyStroke)
       }
       return setFrames([...frames.slice(0, index + 1), next, ...frames.slice(index + 1)], index + 1)
     }
@@ -109,19 +117,32 @@ export function parseProject(json: string): Project {
   }
   const frames: Frame[] = value.frames.map(frame => {
     if (!record(frame) || !unique(frame.id) || !Array.isArray(frame.strokes)) throw invalid()
-    const strokes: Stroke[] = frame.strokes.map(stroke => {
+    const parseStroke = (stroke: unknown): Stroke => {
       if (!record(stroke) || !unique(stroke.id) || (stroke.tool !== 'pen' && stroke.tool !== 'eraser')
         || (stroke.locked !== undefined && typeof stroke.locked !== 'boolean')
         || !hex(stroke.color) || !finite(stroke.size, 1, 200)
         || !Array.isArray(stroke.points) || !stroke.points.length) throw invalid()
-      const points: Point[] = stroke.points.map(point => {
+      const parsePoint = (point: unknown): Point => {
         if (!record(point) || !finite(point.x, -COORDINATE_LIMIT, COORDINATE_LIMIT) || !finite(point.y, -COORDINATE_LIMIT, COORDINATE_LIMIT)
           || (point.pressure !== undefined && !finite(point.pressure, 0, 1))) throw invalid()
         return { x: point.x, y: point.y, ...(point.pressure === undefined ? {} : { pressure: point.pressure }) }
-      })
-      return { id: stroke.id, tool: stroke.tool, color: stroke.color, size: stroke.size, points, ...(stroke.locked === undefined ? {} : { locked: stroke.locked }) }
-    })
-    return { id: frame.id, strokes }
+      }
+      const points = stroke.points.map(parsePoint)
+      let clips: Clip[] | undefined
+      if (stroke.clips !== undefined) {
+        if (!Array.isArray(stroke.clips)) throw invalid()
+        clips = stroke.clips.map(clip => {
+          if (!record(clip) || (clip.mode !== 'inside' && clip.mode !== 'outside')
+            || !Array.isArray(clip.polygon) || clip.polygon.length < 3 || clip.polygon.length > 4096) throw invalid()
+          return { mode: clip.mode, polygon: clip.polygon.map(parsePoint) }
+        })
+      }
+      return { id: stroke.id, tool: stroke.tool, color: stroke.color, size: stroke.size, points,
+        ...(stroke.locked === undefined ? {} : { locked: stroke.locked }), ...(clips && { clips }) }
+    }
+    if (frame.roughs !== undefined && !Array.isArray(frame.roughs)) throw invalid()
+    const strokes = frame.strokes.map(parseStroke)
+    return { id: frame.id, strokes, ...(frame.roughs && { roughs: frame.roughs.map(parseStroke) }) }
   })
   return { version: 1, name: value.name, fps: value.fps, canvas: { width, height, background }, frames }
 }

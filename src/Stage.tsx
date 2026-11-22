@@ -3,7 +3,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import { Maximize, Minus, Plus } from 'lucide-react'
 import { id } from './model'
 import type { Artboard, Frame, Point, Stroke } from './model'
-import { paintFrame, paintStroke, surface } from './render'
+import { hitsVisibleClippedInk, paintFrame, paintStroke, surface } from './render'
 
 import { editableLine, insideBounds, lineBounds, regionPolygon, selectLines, transformLines } from './selection'
 import type { Region, SelectionMode } from './selection'
@@ -14,7 +14,7 @@ type Props = {
   board: Artboard; frame: Frame; previous?: Frame; next?: Frame; onion: Onion
   tool: Tool; size: number; color: string; playing: boolean; space: boolean
   mode: SelectionMode; selected: ReadonlySet<string>; preview: Stroke[] | null
-  onSelect: (ids: string[]) => void; onMove: (dx: number, dy: number) => void
+  onSelect: (ids: string[], region?: Region) => void; onMove: (dx: number, dy: number) => void
   onStroke: (frameId: string, stroke: Stroke) => void
 }
 type View = { zoom: number; x: number; y: number }
@@ -259,8 +259,9 @@ export function Stage({ board, frame, previous, next, onion, tool, size, color, 
         const shape: Region = isClick
           ? { mode: 'rectangle', points: [{ x: cursor.x - hit, y: cursor.y - hit }, { x: cursor.x + hit, y: cursor.y + hit }] }
           : { mode, points: active.points }
-        const ids = selectLines(frame.strokes, shape)
-        onSelect(isClick ? ids.slice(-1) : ids)
+        const ids = new Set(selectLines(frame.strokes, shape))
+        const visibleIds = frame.strokes.filter(stroke => ids.has(stroke.id) && hitsVisibleClippedInk(stroke, shape)).map(stroke => stroke.id)
+        onSelect(isClick ? visibleIds.slice(-1) : visibleIds, isClick ? undefined : shape)
       }
       setRegion(null)
     } else {
