@@ -1,17 +1,20 @@
-import { useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Circle, Layers, Pencil, Pipette, Play } from 'lucide-react'
 import type { Onion, Tool } from './Stage'
+import { LinePanel } from './LinePanel'
+import type { LinePanelProps } from './LinePanel'
 
 export const swatches = ['#242235', '#ffffff', '#8d6bfa', '#ec668a', '#f3a75d', '#f2d46b', '#57c9ac', '#55a4ec']
 const tabs = [{ name: '線', icon: Pencil }, { name: '色', icon: Circle }, { name: '動き', icon: Play }]
 
 type Props = {
   tool: Tool; size: number; setSize: (size: number) => void; color: string; setColor: (color: string) => void
-  onion: Onion; setOnion: (onion: Onion) => void
+  onion: Onion; setOnion: (onion: Onion) => void; lines: LinePanelProps
 }
 
-export function Inspector({ tool, size, setSize, color, setColor, onion, setOnion }: Props) {
+export function Inspector({ tool, size, setSize, color, setColor, onion, setOnion, lines }: Props) {
   const [tab, setTab] = useState(0)
+  useEffect(() => { if (tool === 'select') setTab(0) }, [tool])
   const tabId = useId()
   const buttons = useRef<(HTMLButtonElement | null)[]>([])
   return (
@@ -32,7 +35,8 @@ export function Inspector({ tool, size, setSize, color, setColor, onion, setOnio
         ))}
       </div>
       <div id={`${tabId}-panel`} role="tabpanel" aria-labelledby={`${tabId}-${tab}`}>
-        {tab === 0 && <section className="panel-section">
+        {tab === 0 && tool === 'select' && <LinePanel {...lines} />}
+        {tab === 0 && tool !== 'select' && <section className="panel-section">
           <h2>ブラシ設定</h2>
           <label className="range-label"><span>{tool === 'eraser' ? '消しゴム' : 'ペン'}の太さ</span>
             <output>{size} px</output>

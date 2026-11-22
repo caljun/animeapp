@@ -1,6 +1,6 @@
 export type Point = { x: number; y: number; pressure?: number }
 export type StrokeTool = 'pen' | 'eraser'
-export type Stroke = { id: string; points: Point[]; color: string; size: number; tool: StrokeTool }
+export type Stroke = { id: string; points: Point[]; color: string; size: number; tool: StrokeTool; locked?: boolean }
 export type Frame = { id: string; strokes: Stroke[] }
 export type Artboard = { width: number; height: number; background: string }
 export type Project = { version: 1; name: string; canvas: Artboard; fps: number; frames: Frame[] }
@@ -10,10 +10,12 @@ export type Action =
   | { type: 'load'; project: Project }
   | { type: 'select'; index: number }
   | { type: 'stroke'; frameId: string; stroke: Stroke }
+  | { type: 'edit-lines'; source: Frame; strokes: Stroke[] }
   | { type: 'add' | 'duplicate' | 'delete' | 'undo' | 'redo' }
   | { type: 'fps'; value: number }
   | { type: 'rename'; value: string }
 
+export const COORDINATE_LIMIT = 10_000_000
 export const MAX_FRAMES = 1000
 export const MAX_IMPORT_BYTES = 64 * 1024 * 1024
 export const id = () => crypto.randomUUID()
@@ -53,6 +55,9 @@ export function reduce(state: History, action: Action): History {
       return target < 0 ? state : setFrames(frames.map((frame, position) => position === target
         ? { ...frame, strokes: [...frame.strokes, action.stroke] } : frame))
     }
+    case 'edit-lines':
+      return frames[index] !== action.source || action.strokes === action.source.strokes ? state
+        : setFrames(frames.map((frame, position) => position === index ? { ...frame, strokes: action.strokes } : frame))
     case 'add':
     case 'duplicate': {
       if (frames.length >= MAX_FRAMES) return state
@@ -106,14 +111,15 @@ export function parseProject(json: string): Project {
     if (!record(frame) || !unique(frame.id) || !Array.isArray(frame.strokes)) throw invalid()
     const strokes: Stroke[] = frame.strokes.map(stroke => {
       if (!record(stroke) || !unique(stroke.id) || (stroke.tool !== 'pen' && stroke.tool !== 'eraser')
+        || (stroke.locked !== undefined && typeof stroke.locked !== 'boolean')
         || !hex(stroke.color) || !finite(stroke.size, 1, 200)
         || !Array.isArray(stroke.points) || !stroke.points.length) throw invalid()
       const points: Point[] = stroke.points.map(point => {
-        if (!record(point) || !finite(point.x, 0, width) || !finite(point.y, 0, height)
+        if (!record(point) || !finite(point.x, -COORDINATE_LIMIT, COORDINATE_LIMIT) || !finite(point.y, -COORDINATE_LIMIT, COORDINATE_LIMIT)
           || (point.pressure !== undefined && !finite(point.pressure, 0, 1))) throw invalid()
         return { x: point.x, y: point.y, ...(point.pressure === undefined ? {} : { pressure: point.pressure }) }
       })
-      return { id: stroke.id, tool: stroke.tool, color: stroke.color, size: stroke.size, points }
+      return { id: stroke.id, tool: stroke.tool, color: stroke.color, size: stroke.size, points, ...(stroke.locked === undefined ? {} : { locked: stroke.locked }) }
     })
     return { id: frame.id, strokes }
   })

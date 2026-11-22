@@ -63,7 +63,7 @@ test('rejects invalid JSON, empty frames, duplicate IDs, and invalid strokes', (
     JSON.stringify({ ...project, frames: [...project.frames, ...project.frames] }),
     JSON.stringify({ ...project, fps: 0 }),
     JSON.stringify({ ...project, canvas: { ...project.canvas, width: 50_000 } }),
-    JSON.stringify({ ...project, frames: [{ ...project.frames[0], strokes: [{ ...ink(), points: [{ x: -1, y: 0 }] }] }] }),
+    JSON.stringify({ ...project, frames: [{ ...project.frames[0], strokes: [{ ...ink(), points: [{ x: -10000001, y: 0 }] }] }] }),
     JSON.stringify({ ...project, frames: [{ ...project.frames[0], strokes: [{ ...ink(), tool: 'unknown' }] }] }),
   ]) {
     assert.throws(() => parseProject(input))

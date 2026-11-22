@@ -1,4 +1,5 @@
 import type { Artboard, Frame, Point, Stroke } from './model'
+import { midpoint, strokeWidth } from './selection'
 
 export function surface(width: number, height: number) {
   const canvas = document.createElement('canvas')
@@ -7,11 +8,9 @@ export function surface(width: number, height: number) {
   return canvas
 }
 
-const midpoint = (a: Point, b: Point) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
-
 export function paintStroke(ctx: CanvasRenderingContext2D, stroke: Stroke, start = 0, finish = true) {
   const { points, size, color, tool } = stroke
-  const width = (point: Point) => size * (point.pressure === undefined ? 1 : 0.2 + 0.8 * point.pressure)
+  const width = (point: Point) => strokeWidth(size, point)
   ctx.save()
   ctx.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over'
   ctx.fillStyle = ctx.strokeStyle = color

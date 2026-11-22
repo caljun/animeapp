@@ -1,25 +1,32 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { Maximize, Minus, Plus } from 'lucide-react'
 import { id } from './model'
 import type { Artboard, Frame, Point, Stroke } from './model'
 import { paintFrame, paintStroke, surface } from './render'
 
-export type Tool = Stroke['tool'] | 'hand'
+import { editableLine, insideBounds, lineBounds, regionPolygon, selectLines, transformLines } from './selection'
+import type { Region, SelectionMode } from './selection'
+
+export type Tool = Stroke['tool'] | 'hand' | 'select'
 export type Onion = { enabled: boolean; previous: boolean; next: boolean; opacity: number }
 type Props = {
   board: Artboard; frame: Frame; previous?: Frame; next?: Frame; onion: Onion
   tool: Tool; size: number; color: string; playing: boolean; space: boolean
+  mode: SelectionMode; selected: ReadonlySet<string>; preview: Stroke[] | null
+  onSelect: (ids: string[]) => void; onMove: (dx: number, dy: number) => void
   onStroke: (frameId: string, stroke: Stroke) => void
 }
 type View = { zoom: number; x: number; y: number }
 type Gesture =
   | { pointer: number; type: 'pan'; x: number; y: number }
+  | { pointer: number; type: 'region'; points: Point[] }
+  | { pointer: number; type: 'move'; origin: Point }
   | { pointer: number; type: 'draw'; frame: Frame; stroke: Stroke; painted: number }
 const defaultView: View = { zoom: 1, x: 0, y: 0 }
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
-export function Stage({ board, frame, previous, next, onion, tool, size, color, playing, space, onStroke }: Props) {
+export function Stage({ board, frame, previous, next, onion, tool, size, color, playing, space, mode, selected, preview, onSelect, onMove, onStroke }: Props) {
   const viewport = useRef<HTMLDivElement>(null)
   const display = useRef<HTMLCanvasElement>(null)
   const cache = useRef(new Map<Frame, HTMLCanvasElement>())
@@ -28,6 +35,29 @@ export function Stage({ board, frame, previous, next, onion, tool, size, color, 
   const scheduled = useRef(0)
   const [bounds, setBounds] = useState({ width: 0, height: 0 })
   const [view, setView] = useState(defaultView)
+  const [region, setRegion] = useState<Region | null>(null)
+  const [offset, setOffset] = useState<Point | null>(null)
+  const source = useMemo(() => {
+    const strokes = offset ? transformLines(frame.strokes, selected, { dx: offset.x, dy: offset.y })
+      : preview ?? frame.strokes
+    return strokes === frame.strokes ? frame : { ...frame, strokes }
+  }, [frame, offset, selected, preview])
+  const baseSelection = useMemo(() => frame.strokes.filter(stroke => selected.has(stroke.id)), [frame, selected])
+  const moveBox = useMemo(() => lineBounds(baseSelection.filter(editableLine)), [baseSelection])
+  const outline = useMemo(() => {
+    const lines = source.strokes.filter(stroke => selected.has(stroke.id))
+    return { editable: lineBounds(lines.filter(editableLine)), locked: lines.filter(stroke => stroke.locked) }
+  }, [source, selected])
+
+  useLayoutEffect(() => {
+    const active = gesture.current
+    if (active?.type === 'region' || active?.type === 'move') {
+      gesture.current = null
+      setRegion(null)
+      setOffset(null)
+    }
+  }, [frame, mode, playing, preview, selected, tool])
+
   const [dragging, setDragging] = useState(false)
   const fit = Math.min(Math.max(1, bounds.width - 66) / board.width, Math.max(1, bounds.height - 79) / board.height, 1)
   const scale = view.zoom * fit
@@ -60,7 +90,11 @@ export function Stage({ board, frame, previous, next, onion, tool, size, color, 
     const ctx = display.current?.getContext('2d')
     if (!ctx) return
     const active = gesture.current
-    let drawing = raster(frame)
+    let drawing: HTMLCanvasElement
+    if (offset && source !== frame) {
+      drawing = scratch.current ??= surface(board.width, board.height)
+      paintFrame(drawing.getContext('2d')!, source, board, false)
+    } else drawing = raster(source)
     if (!playing && active?.type === 'draw' && active.frame === frame && scratch.current) {
       drawing = scratch.current
       paintStroke(drawing.getContext('2d')!, active.stroke, active.painted, false)
@@ -76,7 +110,7 @@ export function Stage({ board, frame, previous, next, onion, tool, size, color, 
       ctx.globalAlpha = 1
     }
     ctx.drawImage(drawing, 0, 0)
-  }, [board, frame, previous, next, onion, playing, raster])
+  }, [board, frame, previous, next, onion, playing, raster, source, offset])
 
   useLayoutEffect(() => {
     if (gesture.current?.type === 'draw' && (gesture.current.frame !== frame || playing)) gesture.current = null
@@ -116,11 +150,13 @@ export function Stage({ board, frame, previous, next, onion, tool, size, color, 
     return () => element.removeEventListener('wheel', wheel)
   }, [])
 
-  function point(event: PointerEvent): Point {
+  function point(event: PointerEvent, bounded = true): Point {
     const rect = display.current!.getBoundingClientRect()
+    const x = (event.clientX - rect.left) * board.width / rect.width
+    const y = (event.clientY - rect.top) * board.height / rect.height
     return {
-      x: clamp((event.clientX - rect.left) * board.width / rect.width, 0, board.width),
-      y: clamp((event.clientY - rect.top) * board.height / rect.height, 0, board.height),
+      x: bounded ? clamp(x, 0, board.width) : x,
+      y: bounded ? clamp(y, 0, board.height) : y,
       ...(event.pointerType === 'pen' && event.pressure > 0 ? { pressure: event.pressure } : {}),
     }
   }
@@ -131,8 +167,21 @@ export function Stage({ board, frame, previous, next, onion, tool, size, color, 
       if (space && document.activeElement instanceof HTMLButtonElement) document.activeElement.blur()
       gesture.current = { type: 'pan', pointer: event.pointerId, x: event.clientX, y: event.clientY }
       setDragging(true)
+    } else if (tool === 'select' && !playing && !preview) {
+      if (event.target !== display.current) {
+        onSelect([])
+        return
+      }
+      const origin = point(event.nativeEvent)
+      if (moveBox && !event.shiftKey && insideBounds(moveBox, origin, 5 / scale)) {
+        gesture.current = { type: 'move', pointer: event.pointerId, origin }
+      } else {
+        const points = [origin]
+        gesture.current = { type: 'region', pointer: event.pointerId, points }
+        setRegion({ mode, points })
+      }
     } else {
-      if (playing || event.target !== display.current) return
+      if (playing || tool === 'select' || event.target !== display.current) return
       const stroke: Stroke = { id: id(), tool, size, color, points: [point(event.nativeEvent)] }
       const layer = scratch.current ??= surface(board.width, board.height)
       const ctx = layer.getContext('2d')!
@@ -163,11 +212,29 @@ export function Stage({ board, frame, previous, next, onion, tool, size, color, 
       active.x = event.clientX
       active.y = event.clientY
       setView(current => ({ ...current, x: current.x + dx, y: current.y + dy }))
+    } else if (active.type === 'region') {
+      updateRegion(active, point(event.nativeEvent))
+    } else if (active.type === 'move') {
+      setOffset(displacement(active, event.nativeEvent))
     } else {
       const samples = event.nativeEvent.getCoalescedEvents?.()
       for (const sample of samples?.length ? samples : [event.nativeEvent]) append(active, sample)
       schedule()
     }
+  }
+
+  function updateRegion(active: Extract<Gesture, { type: 'region' }>, p: Point) {
+    if (mode === 'rectangle') active.points[1] = p
+    else {
+      const last = active.points.at(-1)!
+      if (Math.hypot(last.x - p.x, last.y - p.y) >= 1.5 / scale) active.points.push(p)
+    }
+    setRegion({ mode, points: [...active.points] })
+  }
+
+  function displacement(active: Extract<Gesture, { type: 'move' }>, event: PointerEvent): Point {
+    const cursor = point(event, false)
+    return { x: cursor.x - active.origin.x, y: cursor.y - active.origin.y }
   }
 
   function end(event: ReactPointerEvent<HTMLDivElement>, commit: boolean) {
@@ -176,6 +243,26 @@ export function Stage({ board, frame, previous, next, onion, tool, size, color, 
     gesture.current = null
     if (active.type === 'pan') {
       setDragging(false)
+    } else if (active.type === 'move') {
+      setOffset(null)
+      if (commit) {
+        const { x, y } = displacement(active, event.nativeEvent)
+        onMove(x, y)
+      }
+    } else if (active.type === 'region') {
+      if (commit) {
+        const cursor = point(event.nativeEvent)
+        updateRegion(active, cursor)
+        const origin = active.points[0]
+        const hit = 5 / scale
+        const isClick = active.points.every(p => Math.hypot(p.x - origin.x, p.y - origin.y) < hit)
+        const shape: Region = isClick
+          ? { mode: 'rectangle', points: [{ x: cursor.x - hit, y: cursor.y - hit }, { x: cursor.x + hit, y: cursor.y + hit }] }
+          : { mode, points: active.points }
+        const ids = selectLines(frame.strokes, shape)
+        onSelect(isClick ? ids.slice(-1) : ids)
+      }
+      setRegion(null)
     } else {
       if (commit) {
         append(active, event.nativeEvent)
@@ -185,6 +272,15 @@ export function Stage({ board, frame, previous, next, onion, tool, size, color, 
     }
   }
 
+  const placement = {
+    width: board.width * scale, height: board.height * scale,
+    transform: `translate(calc(-50% + ${view.x}px), calc(-50% + ${view.y}px))`,
+  }
+  const guide = (box: NonNullable<typeof moveBox>, locked = false, key?: string) => (
+    <rect key={key} x={box.left} y={box.top} width={box.right - box.left} height={box.bottom - box.top}
+      className={locked ? 'locked-outline' : 'line-outline'} vectorEffect="non-scaling-stroke" />
+  )
+
   return (
     <section className="stage" aria-label="キャンバス">
       <div className="stage-heading"><span className="artboard-mark" /> キャンバス</div>
@@ -193,7 +289,14 @@ export function Stage({ board, frame, previous, next, onion, tool, size, color, 
         onPointerUp={event => end(event, true)} onPointerCancel={event => end(event, false)}
         onLostPointerCapture={event => end(event, false)}>
         <canvas ref={display} width={board.width} height={board.height} aria-label="描画キャンバス"
-          style={{ width: board.width * scale, height: board.height * scale, transform: `translate(calc(-50% + ${view.x}px), calc(-50% + ${view.y}px))` }} />
+          style={placement} />
+        {tool === 'select' && !playing && (region || selected.size > 0) &&
+          <svg className="selection-overlay" style={placement} viewBox={`0 0 ${board.width} ${board.height}`} aria-hidden="true">
+            {!preview && outline.editable && guide(outline.editable)}
+            {outline.locked.map(stroke => guide(lineBounds([stroke])!, true, stroke.id))}
+            {region && <polygon className="selection-region" fillRule="evenodd" vectorEffect="non-scaling-stroke"
+              points={regionPolygon(region).map(p => `${p.x},${p.y}`).join(' ')} />}
+          </svg>}
       </div>
       <div className="stage-bottom">
         <span className="stage-dimensions">{board.width} × {board.height} px</span>

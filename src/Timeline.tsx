@@ -83,9 +83,9 @@ export function Timeline({ board, frames, index, fps, loop, playing, select, tog
           <span className="frame-counter" aria-label="現在のコマ番号"><b>{String(index + 1).padStart(2, '0')}</b><span>/</span>{String(frames.length).padStart(2, '0')}</span>
         </div>
         <div className="frame-actions">
-          <button aria-label="コマを複製" title="コマを複製" onClick={() => edit('duplicate')} disabled={full}><Copy /></button>
-          <button aria-label="コマを削除" title="コマを削除" onClick={() => edit('delete')} disabled={frames.length === 1}><Trash2 /></button>
-          <button className="add-frame" onClick={() => edit('add')} disabled={full}><Plus />コマを追加</button>
+          <button aria-label="コマを複製" title="コマを複製" onClick={() => edit('duplicate')} disabled={playing || full}><Copy /></button>
+          <button aria-label="コマを削除" title="コマを削除" onClick={() => edit('delete')} disabled={playing || frames.length === 1}><Trash2 /></button>
+          <button className="add-frame" onClick={() => edit('add')} disabled={playing || full}><Plus />コマを追加</button>
         </div>
       </div>
       <div className="frame-rail" ref={list}
@@ -114,7 +114,7 @@ export function Timeline({ board, frames, index, fps, loop, playing, select, tog
             <span className="frame-label"><span>{String(i + 1).padStart(2, '0')}</span>{i === index && <i />}</span>
           </button>
         ))}
-        <button className="rail-add" aria-label="空白のコマを追加" title="空白のコマを追加" onClick={() => edit('add')} disabled={full}><Plus /></button>
+        <button className="rail-add" aria-label="空白のコマを追加" title="空白のコマを追加" onClick={() => edit('add')} disabled={playing || full}><Plus /></button>
       </div>
     </section>
   )

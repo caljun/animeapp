@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   ChevronDown, Download, Eraser, FileDown, Film, FolderOpen, Hand, Image, Layers,
-  Pencil, Redo2, Undo2, X,
+  Pencil, Redo2, Scan, Undo2, X,
 } from 'lucide-react'
 import { Stage } from './Stage'
 import type { Onion, Tool } from './Stage'
@@ -9,12 +9,17 @@ import { Inspector, swatches } from './Inspector'
 import { Timeline } from './Timeline'
 import { initialProject, makeHistory, MAX_IMPORT_BYTES, parseProject, reduce } from './model'
 import type { Stroke } from './model'
+import { deleteLines, duplicateLines, editSelected, smoothLines, transformLines } from './selection'
+import type { SelectionMode, Smoothing, Transform } from './selection'
 import { usePlayback } from './playback'
 import { download, exportPng, fileBase } from './files'
+
+const noSelection: ReadonlySet<string> = new Set()
 
 const tools = [
   { id: 'pen', name: 'ペン', key: 'B', icon: Pencil },
   { id: 'eraser', name: '消しゴム', key: 'E', icon: Eraser },
+  { id: 'select', name: '選択', key: 'V', icon: Scan },
   { id: 'hand', name: '移動', key: 'H', icon: Hand },
 ] as const
 
@@ -22,6 +27,9 @@ export function App() {
   const [history, dispatch] = useReducer(reduce, undefined, () => makeHistory(initialProject()))
   const { project, index } = history.present
   const [tool, setTool] = useState<Tool>('pen')
+  const [mode, setMode] = useState<SelectionMode>('rectangle')
+  const [selection, setSelection] = useState<{ frameId: string; ids: ReadonlySet<string> } | null>(null)
+  const [candidate, setCandidate] = useState<Smoothing | null>(null)
   const [sizes, setSizes] = useState({ pen: 8, eraser: 36 })
   const [color, setColor] = useState(swatches[0])
   const [onion, setOnion] = useState<Onion>({ enabled: true, previous: true, next: false, opacity: 0.25 })
@@ -38,21 +46,62 @@ export function App() {
   const { playing } = playback
   const shown = playing ? playback.preview : index
   const frame = project.frames[shown]
+  const selected = !playing && tool === 'select' && selection?.frameId === frame.id ? selection.ids : noSelection
+  const selectedStrokes = useMemo(() => frame.strokes.filter(stroke => selected.has(stroke.id)), [frame, selected])
+  const preview = useMemo(() => candidate === null || playing || !selected.size ? null
+    : smoothLines(frame.strokes, selected, candidate), [frame, selected, candidate, playing])
   const brush = tool === 'eraser' ? 'eraser' : 'pen'
   const onStroke = useCallback((frameId: string, stroke: Stroke) => dispatch({ type: 'stroke', frameId, stroke }), [])
 
+  function clearSelection() {
+    setSelection(null)
+    setCandidate(null)
+  }
+
+  function changeTool(next: Tool) {
+    if (next !== tool) clearSelection()
+    setTool(next)
+  }
+
+  function selectLines(ids: Iterable<string>) {
+    if (playing || candidate !== null) return
+    const next = new Set(ids)
+    setSelection(next.size ? { frameId: frame.id, ids: next } : null)
+  }
+
+  function commitLines(strokes: Stroke[]) {
+    if (!playing && tool === 'select' && strokes !== frame.strokes) {
+      dispatch({ type: 'edit-lines', source: frame, strokes })
+    }
+  }
+
+  function transform(value: Transform) {
+    if (candidate === null) commitLines(transformLines(frame.strokes, selected, value))
+  }
+
+  function removeLines() {
+    if (candidate !== null || playing) return
+    commitLines(deleteLines(frame.strokes, selected))
+    selectLines(selectedStrokes.filter(stroke => stroke.locked).map(stroke => stroke.id))
+  }
+
   function changeFrame(position: number) {
     playback.cancel()
+    if (position !== index || playing) clearSelection()
     selectIndex(position)
   }
 
   function togglePlay() {
     if (playing) playback.stop()
-    else playback.play(index)
+    else {
+      clearSelection()
+      playback.play(index)
+    }
   }
 
   function historyAction(type: 'undo' | 'redo') {
-    playback.cancel()
+    if (playing) return
+    clearSelection()
     dispatch({ type })
   }
 
@@ -73,6 +122,7 @@ export function App() {
       if (file.size > MAX_IMPORT_BYTES) throw new Error('64 MB 以下の JSON を選択してください。')
       const next = parseProject(await file.text())
       playback.cancel()
+      clearSelection()
       setName(null)
       setBoardKey(key => key + 1)
       dispatch({ type: 'load', project: next })
@@ -125,9 +175,16 @@ export function App() {
         if (!(event.target instanceof HTMLElement && event.target.closest('button'))) event.preventDefault()
         setSpace(true)
       }
-      if (key === 'b') setTool('pen')
-      if (key === 'e') setTool('eraser')
-      if (key === 'h') setTool('hand')
+      if (key === 'b') changeTool('pen')
+      if (key === 'e') changeTool('eraser')
+      if (key === 'h') changeTool('hand')
+      if (key === 'v' && !playing) changeTool('select')
+      if (key === 'escape' && candidate !== null) setCandidate(null)
+      else if (key === 'escape') clearSelection()
+      if ((key === 'delete' || key === 'backspace') && selected.size && candidate === null) {
+        event.preventDefault()
+        removeLines()
+      }
       if (key === 'arrowleft' || key === 'arrowright') {
         event.preventDefault()
         const next = shown + (key === 'arrowright' ? 1 : -1)
@@ -182,7 +239,7 @@ export function App() {
           <div className="tool-group">
             {tools.map(({ id, name: label, key, icon: Icon }) => (
               <button key={id} className={tool === id ? 'active' : ''} aria-pressed={tool === id}
-                title={`${label} (${key})`} onClick={() => setTool(id)}><Icon /><span>{label}</span></button>
+                title={`${label} (${key})`} disabled={id === 'select' && playing} onClick={() => changeTool(id)}><Icon /><span>{label}</span></button>
             ))}
           </div>
           <label className="toolbar-color" title="描画色を選択"><span style={{ background: color }} />
@@ -190,20 +247,39 @@ export function App() {
             色
           </label>
           <div className="tool-group history-tools">
-            <button title="元に戻す (Ctrl/⌘ Z)" aria-label="元に戻す" disabled={!history.past.length} onClick={() => historyAction('undo')}><Undo2 /><span>戻す</span></button>
-            <button title="やり直す (Ctrl/⌘ Shift Z)" aria-label="やり直す" disabled={!history.future.length} onClick={() => historyAction('redo')}><Redo2 /><span>進む</span></button>
+            <button title="元に戻す (Ctrl/⌘ Z)" aria-label="元に戻す" disabled={playing || !history.past.length} onClick={() => historyAction('undo')}><Undo2 /><span>戻す</span></button>
+            <button title="やり直す (Ctrl/⌘ Shift Z)" aria-label="やり直す" disabled={playing || !history.future.length} onClick={() => historyAction('redo')}><Redo2 /><span>進む</span></button>
           </div>
         </aside>
         <Stage key={boardKey} board={project.canvas} frame={frame} previous={project.frames[shown - 1]}
           next={project.frames[shown + 1]} onion={onion} tool={tool} size={sizes[brush]} color={color}
-          playing={playing} space={space} onStroke={onStroke} />
+          playing={playing} space={space} onStroke={onStroke} mode={mode} selected={selected}
+          preview={preview} onSelect={selectLines} onMove={(dx, dy) => transform({ dx, dy })} />
         <Inspector tool={tool} size={sizes[brush]} setSize={size => setSizes({ ...sizes, [brush]: size })}
-          color={color} setColor={setColor} onion={onion} setOnion={setOnion} />
+          color={color} setColor={setColor} onion={onion} setOnion={setOnion}
+          lines={{
+            mode, setMode, playing, strokes: selectedStrokes, candidate, choose: setCandidate,
+            clear: clearSelection, transform, remove: removeLines,
+            apply: () => {
+              if (preview) commitLines(preview)
+              setCandidate(null)
+            },
+            duplicate: () => {
+              const copies = duplicateLines(frame.strokes, selected)
+              commitLines(copies.strokes)
+              selectLines(copies.ids)
+            },
+            style: value => commitLines(editSelected(frame.strokes, selected, stroke =>
+              (value.color === undefined || value.color === stroke.color) && (value.size === undefined || value.size === stroke.size)
+                ? stroke : { ...stroke, ...value })),
+            lock: locked => commitLines(editSelected(frame.strokes, selected, stroke =>
+              Boolean(stroke.locked) === locked ? stroke : { ...stroke, locked }, true)),
+          }} />
       </main>
       <Timeline board={project.canvas} frames={project.frames} index={shown} fps={project.fps} loop={loop}
         playing={playing} select={changeFrame} togglePlay={togglePlay} toggleLoop={() => setLoop(value => !value)}
         setFps={value => { playback.stop(); dispatch({ type: 'fps', value }) }}
-        edit={type => { playback.stop(); dispatch({ type }) }} />
+        edit={type => { if (!playing) { clearSelection(); dispatch({ type }) } }} />
       <footer className="status-bar">
         <span><i className={playing ? 'live' : ''} />{playing ? '再生中' : '編集中'}</span>
         <span><kbd>Space</kbd> + ドラッグで移動 <b>·</b> ホイールでズーム</span>
