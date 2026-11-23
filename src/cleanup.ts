@@ -49,12 +49,6 @@ export function prepareCleanup(frame: Frame, board: Artboard, ids: ReadonlySet<s
   mask.restore()
   const available = mask.getImageData(0, 0, side, side)
   const allowed = Uint8Array.from({ length: side * side }, (_, i) => available.data[i * 4 + 3] >= 250 ? 1 : 0)
-  const protection = surface(side, side)
-  const protectionCtx = protection.getContext('2d')!
-  const pixels = protectionCtx.createImageData(side, side)
-  for (let i = 0; i < allowed.length; i++) pixels.data[i * 4 + 3] = allowed[i] ? 0 : 255
-  protectionCtx.putImageData(pixels, 0, 0)
-
   function renderRough(strokes: readonly Stroke[]) {
     const canvas = surface(side, side)
     const ctx = canvas.getContext('2d')!
@@ -78,7 +72,7 @@ export function prepareCleanup(frame: Frame, board: Artboard, ids: ReadonlySet<s
     return { ...p, x: x + (p.x - left) / scale, y: y + (p.y - top) / scale }
   }
   return { targets, polygon, allowed, scale, toBoard, renderRough,
-    image: rough.toDataURL('image/png'), mask: protection.toDataURL('image/png'), rect: { x, y, width, height } }
+    image: rough.toDataURL('image/png'), rect: { x, y, width, height } }
 }
 
 async function extract(canvas: HTMLCanvasElement, input: CleanupInput): Promise<CleanupCandidate> {
@@ -102,7 +96,7 @@ async function extract(canvas: HTMLCanvasElement, input: CleanupInput): Promise<
   return { strokes, original: canvas.toDataURL('image/webp', 0.78), thumbnail: thumbnail.toDataURL(), note }
 }
 
-export async function generateCleanup(input: CleanupInput, mode: CleanupMode, strength: number, token: string, signal: AbortSignal) {
+export async function generateCleanup(input: CleanupInput, mode: CleanupMode, strength: number, signal: AbortSignal) {
   const selected = new Set(input.targets.map(stroke => stroke.id))
   return Promise.all([0, 1, 2].map(async variant => {
     signal.throwIfAborted()
@@ -119,8 +113,8 @@ export async function generateCleanup(input: CleanupInput, mode: CleanupMode, st
       })))
     } else {
       const response = await fetch('/api/cleanup', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Koma-Token': token }, signal,
-        body: JSON.stringify({ image: input.image, mask: input.mask, rect: input.rect, strength, variant }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
+        body: JSON.stringify({ image: input.image, rect: input.rect, strength, variant }),
       })
       if (!response.ok || !response.headers.get('content-type')?.startsWith('image/')) {
         const data = await response.json().catch(() => null)
@@ -128,7 +122,7 @@ export async function generateCleanup(input: CleanupInput, mode: CleanupMode, st
       }
       const image = await createImageBitmap(await response.blob())
       try {
-        if (image.width !== 1024 || image.height !== 1024) throw new Error('出力のサイズが一致しません。')
+        if (image.width !== side || image.height !== side) throw new Error('出力のサイズが一致しません。')
         canvas = surface(side, side)
         canvas.getContext('2d')!.drawImage(image, 0, 0, side, side)
       } finally { image.close() }

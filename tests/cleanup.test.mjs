@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createCleanupHandler, model } from '../server/cleanup.mjs'
+import { buildWorkflow, checkpoint, controlnet, createCleanupHandler } from '../server/cleanup.mjs'
 import { archiveRoughs, cleanupTargets, stageCleanup } from '../src/cleanupScope.ts'
 import { initialProject, makeHistory, parseProject, reduce } from '../src/model.ts'
 import { transformLines } from '../src/selection.ts'
@@ -52,36 +52,75 @@ test('regional apply preserves other lines and frames, serializes original archi
 })
 
 const url = 'http://localhost/api/cleanup'
-const env = { OPENAI_API_KEY: 'server-test-key', KOMA_AI_ACCESS_TOKEN: 'tests-only-access-token' }
-const proto = Buffer.alloc(33)
-Buffer.from('89504e470d0a1a0a', 'hex').copy(proto)
-proto.write('IHDR', 12)
-proto.writeUInt32BE(512, 16)
-proto.writeUInt32BE(512, 20)
-const png = 'data:image/png;base64,' + proto.toString('base64')
-const request = (token, variant = 0) => new Request(url, {
-  method: 'POST', headers: { 'X-Koma-Token': token },
-  body: JSON.stringify({ variant, strength: 55, image: png, mask: png, rect: { x: 0, y: 0, width: 300, height: 220 } }),
+const pngHeader = Buffer.alloc(33)
+Buffer.from('89504e470d0a1a0a', 'hex').copy(pngHeader)
+pngHeader.write('IHDR', 12)
+pngHeader.writeUInt32BE(512, 16)
+pngHeader.writeUInt32BE(512, 20)
+const png = 'data:image/png;base64,' + pngHeader.toString('base64')
+const request = (variant = 0, options = {}) => new Request(url, {
+  method: 'POST', headers: { 'Content-Type': 'application/json', ...options.headers },
+  body: JSON.stringify({ variant, strength: 55, image: png, rect: { x: 0, y: 0, width: 300, height: 220 } }),
+  signal: options.signal,
 })
 
-test('API protects paid requests, forwards distinct prompts and fails without fabricating an image', async () => {
-  const disabled = createCleanupHandler({})
-  assert.deepEqual(await (await disabled(new Request(url))).json(), { enabled: false, model })
-  assert.equal((await disabled(request(env.KOMA_AI_ACCESS_TOKEN))).status, 503)
-  const prompts = []
-  const validOutput = Buffer.from('RIFFxxxxWEBP').toString('base64')
-  const handler = createCleanupHandler(env, async (target, options) => {
-    assert.equal(target, 'https://api.openai.com/v1/images/edits')
-    assert.equal(options.headers.Authorization, 'Bearer server-test-key')
-    assert.equal(options.body.get('model'), model)
-    assert.equal(options.body.get('mask').type, 'image/png')
-    prompts.push(options.body.get('prompt'))
-    return Response.json({ data: [{ b64_json: validOutput }] })
+test('all candidates use the requested local models, with stronger denoising from A to C', () => {
+  const graphs = [0, 1, 2].map(i => buildWorkflow('koma/example.png', i, 55, 123))
+  assert.equal(graphs[0]['1'].inputs.ckpt_name, checkpoint)
+  assert.equal(graphs[0]['4'].inputs.control_net_name, controlnet)
+  assert.equal(graphs[0]['3'].class_type, 'ImageInvert')
+  assert.deepEqual(graphs[0]['9'].inputs.latent_image, ['8', 0])
+  assert.ok(graphs[0]['9'].inputs.denoise < graphs[1]['9'].inputs.denoise)
+  assert.ok(graphs[1]['9'].inputs.denoise < graphs[2]['9'].inputs.denoise)
+})
+
+test('the bridge reports local models and uploads, queues and reads a candidate', async () => {
+  const routes = []
+  const handler = createCleanupHandler({}, async (address, options) => {
+    assert.ok(address.startsWith('http://127.0.0.1:8188/'))
+    const path = new URL(address).pathname
+    routes.push(path)
+    if (path.includes('/object_info/')) {
+      const name = path.split('/').at(-1)
+      const [field, model] = name === 'CheckpointLoaderSimple' ? ['ckpt_name', checkpoint] : ['control_net_name', controlnet]
+      return Response.json({ [name]: { input: { required: { [field]: [[model]] } } } })
+    }
+    if (path === '/upload/image') {
+      assert.equal(options.body.get('image').type, 'image/png')
+      return Response.json({ name: 'koma-123.png', subfolder: 'koma' })
+    }
+    if (path === '/prompt') {
+      assert.equal(JSON.parse(options.body).prompt['2'].inputs.image, 'koma/koma-123.png')
+      return Response.json({ prompt_id: 'job' })
+    }
+    if (path === '/history/job') return Response.json({ job: { outputs: { 11: { images: [{ filename: 'candidate.png', subfolder: '' }] } } } })
+    if (path === '/view') return new Response(pngHeader, { headers: { 'Content-Type': 'image/png' } })
+    throw Error(path)
   })
-  assert.equal((await handler(request('invalid'))).status, 401)
-  assert.equal((await handler(request(env.KOMA_AI_ACCESS_TOKEN, 7))).status, 400)
-  for (let i = 0; i < 3; i++) assert.equal((await handler(request(env.KOMA_AI_ACCESS_TOKEN, i))).headers.get('Content-Type'), 'image/webp')
-  assert.equal(new Set(prompts).size, 3)
-  const failure = createCleanupHandler(env, async () => new Response(null, { status: 429 }))
-  assert.equal((await failure(request(env.KOMA_AI_ACCESS_TOKEN))).status, 502)
+  assert.deepEqual(await (await handler(new Request(url))).json(), { enabled: true })
+  assert.equal((await handler(request(0, { headers: { 'Sec-Fetch-Site': 'cross-site' } }))).status, 403)
+  assert.equal((await handler(request(9))).status, 400)
+  assert.deepEqual(Buffer.from(await (await handler(request())).arrayBuffer()), pngHeader)
+  assert.deepEqual(routes.slice(-4), ['/upload/image', '/prompt', '/history/job', '/view'])
+  const offline = createCleanupHandler({}, async () => { throw new TypeError('connection refused') })
+  assert.equal((await (await offline(new Request(url))).json()).enabled, false)
+  assert.equal((await offline(request())).status, 502)
+})
+
+test('cancellation deletes and interrupts only the submitted job', async () => {
+  const controller = new AbortController()
+  const stopped = []
+  const handler = createCleanupHandler({}, async (address, options) => {
+    const path = new URL(address).pathname
+    if (path === '/upload/image') return Response.json({ name: 'koma-123.png', subfolder: 'koma' })
+    if (path === '/prompt') return Response.json({ prompt_id: 'owned' })
+    if (path === '/history/owned') {
+      controller.abort()
+      return Response.json({})
+    }
+    stopped.push([path, JSON.parse(options.body)])
+    return new Response(null)
+  })
+  assert.equal((await handler(request(0, { signal: controller.signal }))).status, 502)
+  assert.deepEqual(stopped, [['/queue', { delete: ['owned'] }], ['/interrupt', { prompt_id: 'owned' }]])
 })

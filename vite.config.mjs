@@ -3,9 +3,14 @@ import { defineConfig, loadEnv } from 'vite'
 import { createCleanupHandler } from './server/cleanup.mjs'
 
 export default defineConfig(({ mode }) => {
-  const cleanup = createCleanupHandler({ ...loadEnv(mode, process.cwd(), ''), ...process.env })
+  const cleanup = createCleanupHandler({ ...loadEnv(mode, process.cwd(), 'KOMA_COMFY_'), ...process.env })
   async function handler(req, res, next) {
     if (req.url?.split('?')[0] !== '/api/cleanup') return next()
+    if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(req.headers.host ?? '')) {
+      res.writeHead(403)
+      res.end()
+      return
+    }
     const controller = new AbortController()
     res.once('close', () => { if (!res.writableEnded) controller.abort() })
     try {
@@ -23,6 +28,8 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
+    server: { host: '127.0.0.1' },
+    preview: { host: '127.0.0.1' },
     plugins: [{
       name: 'koma-cleanup',
       configureServer(server) { server.middlewares.use(handler) },

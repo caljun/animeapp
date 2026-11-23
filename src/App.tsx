@@ -92,7 +92,7 @@ export function App() {
     setSelection(next.size ? { frameId: frame.id, ids: next, region: region ?? null } : null)
   }
 
-  async function runCleanup(mode: CleanupMode, strength: number, token: string) {
+  async function runCleanup(mode: CleanupMode, strength: number) {
     if (playing || cleanupRequest.current || !selection || !selectedStrokes.some(stroke => !stroke.locked)) return
     setCleanup(null)
     setCleanupError('')
@@ -103,7 +103,7 @@ export function App() {
       const { prepareCleanup, generateCleanup } = await import('./cleanup')
       request.signal.throwIfAborted()
       const input = prepareCleanup(frame, project.canvas, selected, selection.region)
-      const candidates = await generateCleanup(input, mode, strength, token, request.signal)
+      const candidates = await generateCleanup(input, mode, strength, request.signal)
       if (cleanupRequest.current === request) setCleanup({ frame, input, mode, candidates, active: 0 })
     } catch (error) {
       if (cleanupRequest.current === request) {
@@ -322,7 +322,7 @@ export function App() {
             cleanup: {
               busy: cleanupBusy, result: cleanup, error: cleanupError,
               canStart: !playing && selectedStrokes.some(stroke => !stroke.locked),
-              generate: (mode, strength, token) => void runCleanup(mode, strength, token),
+              generate: (mode, strength) => void runCleanup(mode, strength),
               choose: active => setCleanup(current => current && { ...current, active }),
               apply: applyCleanup, cancel: resetCleanup,
             },
